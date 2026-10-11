@@ -77,7 +77,7 @@ We also wrote an offline benchmark so we have repeatable numbers to back up what
 - Latency: how long one item takes from start to finish. For us, from the moment a camera frame is captured to the moment the hand position from that frame is ready. Measured in ms.
 - Throughput: how many items are finished per second. For us, detector FPS.
 
-For a single model working on one frame at a time, throughput is roughly 1000 / latency. Tiny@320 on CPU takes 8.8 ms, so about 113 FPS. But they are not the same thing in general. With batching or pipelining you can raise throughput without lowering latency (you finish more frames per second, but each one still takes as long). For an interactive game, latency is what the player feels.
+For a single model working on one frame at a time, throughput is roughly 1000 / latency. Tiny@320 on CPU takes 8.8 ms, so about 114 FPS. But they are not the same thing in general. With batching or pipelining you can raise throughput without lowering latency (you finish more frames per second, but each one still takes as long). For an interactive game, latency is what the player feels.
 
 ### 3.2 The different FPS numbers
 
@@ -88,7 +88,7 @@ We show three different "FPS" ideas and it is easy to mix them up:
 - Detector FPS: how many inference results per second the background thread produces. Live, this comes from `TrackerState.detector_fps`, computed over the last 10 results. In the round summary it is `n_results / elapsed` from `HandTracker.summary()`.
 - Benchmark FPS: the `fps` column in the CSV, which is just `1000 / mean_ms`. This is the speed the model could reach if frames were always ready instantly.
 
-Important: in the live game, detector FPS cannot go above camera FPS, because the detector only runs when a new frame arrives. So even though Tiny@320 can do 113 FPS in the benchmark, in the game it is capped around the camera rate (~30 FPS). In a test with a fake camera, Tiny@320 ran at about 26 detector FPS with about 13 ms delay. A slow model like Big@640 on CPU (about 4.3 FPS) is far below the camera rate, so it skips most frames.
+Important: in the live game, detector FPS cannot go above camera FPS, because the detector only runs when a new frame arrives. So even though Tiny@320 can do 114 FPS in the benchmark, in the game it is capped around the camera rate (~30 FPS). In a test with a fake camera, Tiny@320 ran at about 26 detector FPS with about 13 ms delay. A slow model like Big@640 on CPU (about 4.3 FPS) is far below the camera rate, so it skips most frames.
 
 ### 3.3 Where the delay comes from
 
@@ -143,7 +143,7 @@ A convolution does the same work at every position of the feature map. So comput
 | Small | 1.5 | 5.8 | 23.4 |
 | Big | 12.7 | 51.0 | 204.2 |
 
-From 320 to 640 the pixel count goes 256x320 = 81,920 to 480x640 = 307,200, which is 3.75x, and Tiny's GFLOPs go 1.9 to 7.6 (4x). Time does not scale perfectly with FLOPs: small inputs have fixed overheads (Python, framework, memory), and the CPU is used more efficiently on bigger tensors. For example Big goes from 66.8 ms to 234.0 ms (3.5x) for 4x FLOPs, and Tiny goes from 4.4 ms at 160 to 8.8 ms at 320 (2x) for about 4x FLOPs.
+From 320 to 640 the pixel count goes 256x320 = 81,920 to 480x640 = 307,200, which is 3.75x, and Tiny's GFLOPs go 1.9 to 7.6 (4x). Time does not scale perfectly with FLOPs: small inputs have fixed overheads (Python, framework, memory), and the CPU is used more efficiently on bigger tensors. For example Big goes from 67.2 ms to 233.6 ms (3.5x) for 4x FLOPs, and Tiny goes from 4.3 ms at 160 to 8.8 ms at 320 (2x) for about 4x FLOPs.
 
 ### 3.6 Parameters vs FLOPs vs file size
 
@@ -253,8 +253,8 @@ MPS (Metal Performance Shaders) is PyTorch's backend for the GPU on Apple Silico
 
 What the numbers show:
 
-- For Big@640 MPS takes 105.7 ms vs 234.0 ms on CPU (about 2.2x faster).
-- For Tiny@320 they are the same: 8.8 ms on both. The model is so small that the GPU's fixed costs (sending data, launching kernels, waiting for results) eat the gain. Tiny@160 is even slower on MPS (8.0 ms) than on CPU (4.4 ms).
+- For Big@640 MPS takes 111.6 ms vs 233.6 ms on CPU (about 2.1x faster).
+- For Tiny@320 they are about the same: 8.8 ms on CPU and 9.1 ms on MPS. The model is so small that the GPU's fixed costs (sending data, launching kernels, waiting for results) eat the gain. Tiny@160 is even slower on MPS (8.1 ms) than on CPU (4.3 ms).
 - On MPS `post_ms` is large (for Big@640, 96.8 ms of postprocessing vs 7.6 ms "inference"). This is because the GPU runs asynchronously: `infer_ms` only measures queueing the work, and the real wait happens when results are copied back to the CPU during postprocessing. So on MPS only the total (`mean_ms`) is meaningful, not the split.
 
 Lesson: an accelerator helps big models a lot and small models barely or not at all.
@@ -280,6 +280,41 @@ So on the edge we choose the smallest model and input size that is accurate enou
 - TFLite (LiteRT): TensorFlow's runtime for mobile and microcontrollers, with good INT8 support and delegates for phone GPUs/NPUs.
 
 Ultralytics can export to ONNX, TFLite, CoreML, OpenVINO and others with `model.export(format=...)`, so these are realistic next steps.
+
+---
+
+### 3.17 Green sticker mode: classic colour tracking
+
+This is the fourth option in the model picker. The player sticks a green dot (or a bit of green tape) on the palm, and instead of a neural network we find it with plain OpenCV. It is here as a comparison: what if we drop deep learning completely?
+
+The steps in `find_green_dot(frame, imgsz)`:
+
+1. Shrink the frame so the long side is `imgsz` (INTER_AREA). Same idea as the input size for YOLO, fewer pixels means less work. 80 px is also allowed here, because a big green blob is still visible at 80x60.
+2. Small Gaussian blur (3x3) to remove a bit of camera noise.
+3. Convert BGR to HSV.
+4. `cv2.inRange(hsv, GREEN_LOW, GREEN_HIGH)` with `GREEN_LOW = (40, 70, 70)` and `GREEN_HIGH = (85, 255, 255)`. Every pixel inside the range becomes 255, everything else 0. This is the binary mask (the app shows it as "Green mask" in the preview).
+5. Morphological open with a 3x3 kernel: erode then dilate. Erode removes single noisy pixels, dilate grows the real blob back to roughly its size.
+6. `cv2.findContours` on the mask (outer contours only) and pick the biggest one by `cv2.contourArea`.
+7. If its area is below `GREEN_MIN_AREA` (0.05 % of the image area, so it scales with imgsz) we say no hand. Otherwise take the centroid from image moments: `cx = m10 / m00`, `cy = m01 / m00`. `m00` is the area, `m10` and `m01` are the sums of x and y over the blob, so this is just the average position of the blob pixels.
+8. Scale the centroid back to full frame pixels and return it.
+
+Why HSV and not RGB: in RGB (BGR in OpenCV) the brightness is mixed into all three channels. The same green sticker in shadow might be (20, 80, 20) and in bright light (120, 250, 120), so a simple box in RGB space does not catch both. HSV splits colour into Hue (which colour, 0 to 179 in OpenCV, green is around 60), Saturation (how colourful vs grey) and Value (how bright). So we can say "hue between 40 and 85, not too grey, not too dark" and lighting changes mostly move V, not H. The minimum S of 70 stops white or grey walls from counting, the minimum V of 70 stops very dark pixels (where the hue is basically random) from counting.
+
+Why it is so fast: there is no network at all. Every step is a simple operation per pixel (resize, blur, colour convert, compare, 3x3 erode/dilate) plus contour tracing, so the cost is roughly O(number of pixels) with tiny constants, and OpenCV does it in optimized C++ with SIMD. At 160 px that is only 19,200 pixels. Compare with YOLO, where even Tiny@160 needs about 0.5 GFLOPs. 0 params, 0 MB of weights, nothing to load or warm up, and it does not use PyTorch, so the CPU threads setting does nothing here.
+
+Numbers from our benchmark (CPU): 0.22 ms at 80, 0.06 ms at 160, 0.16 ms at 320 and 0.52 ms at 640. Tiny@160, the fastest YOLO setting, is 4.3 ms, so even green@640 is about 8x faster, and green@160 is about 70x faster. One odd thing: 80 is slower than 160. That is OpenCV's INTER_AREA resize: it has a fast path when shrinking by 2x or 4x, but 640 to 80 is 8x and goes through the slower general code. We checked: resizing to 80x60 with INTER_AREA took about 0.2 ms, to 160x120 about 0.01 ms. INTER_LINEAR at 80 would be faster but skips pixels, so a small dot could flicker. In the game it does not matter, both are far below a millisecond.
+
+In the live game it is capped by the camera just like YOLO: in our fake camera test green@80 gave about 25 detector FPS with about 1 ms delay, against about 26 FPS and 12 ms for Tiny@320. So the circle is almost exactly on the current frame.
+
+Limitations (why everyone does not just do this):
+
+- You need a marker. It tracks a green dot, not a hand. Without the sticker it finds nothing, or worse, finds something else.
+- Any other green thing in view (a plant, a green t-shirt, a green wall) can be bigger than the sticker and wins. Even our test image has a greenish patch of about 940 px in the corner at 640, which beat a 15 px radius dot at 320 and 640, so the benchmark uses a 25 px radius dot.
+- Lighting: very warm or dim light shifts the colours, the hue range may need tuning. Strong glare makes the sticker look white (low saturation). Auto white balance on webcams also moves colours around.
+- Fixed thresholds. We picked the range by hand. A real system would calibrate at the start (for example click on the sticker and learn its colour).
+- No understanding: it cannot tell a palm from a leaf. A pose model knows what a person looks like and works for any player with no setup.
+
+Classical CV vs deep learning, and the edge angle: classical CV is hand designed rules (colour ranges, edges, shapes). It needs almost no compute and memory, is easy to explain, and has no training data, but it only works in the conditions it was designed for. Deep learning learns features from data, so it handles the messy real world (any person, clothes, background, light) but needs much more compute, memory and a big trained model. On an edge device this matters a lot: a microcontroller or a cheap camera can run colour tracking at full frame rate with almost no power, where even a tiny network may be too slow. In industry both are used, often together: if you control the scene (a factory line, a marker on a robot, a lab setup), classic CV is cheap and good enough. If you do not control the scene, you need a learned model. A common trick is a cheap classic step first (motion or colour) and only run the network when something interesting happens.
 
 ---
 
@@ -310,7 +345,7 @@ Constants:
 
 ### 4.2 `detector.py` - models, hand point, background thread
 
-Constants (all explained above): `MODELS_DIR`, `MODELS` (label to weights file), `IMG_SIZES = [160, 320, 640]`, `DEFAULT_IMGSZ = 320`, `FRAME_WIDTH = 640`, `DEFAULT_THREADS = 4`, keypoint indices, `KPT_CONF = 0.4`, `PERSON_CONF = 0.3`, `MAX_PEOPLE = 5`, `PALM_EXTEND = 0.35`.
+Constants (all explained above): `MODELS_DIR`, `MODELS` (label to weights file), `IMG_SIZES = [160, 320, 640]`, `DEFAULT_IMGSZ = 320`, `FRAME_WIDTH = 640`, `DEFAULT_THREADS = 4`, keypoint indices, `KPT_CONF = 0.4`, `PERSON_CONF = 0.3`, `MAX_PEOPLE = 5`, `PALM_EXTEND = 0.35`. For the green mode: `GREEN_LABEL`, `GREEN = "green"` (what we pass to `HandTracker` instead of a model), `GREEN_SIZES = [80, 160, 320, 640]`, `GREEN_DEFAULT_IMGSZ = 160`, `GREEN_LOW`, `GREEN_HIGH`, `GREEN_MIN_AREA`.
 
 Functions:
 
@@ -326,6 +361,8 @@ Functions:
 - `_to_numpy(x)`: converts torch tensors (`.cpu().numpy()`) or arrays to float numpy.
 - `hand_from_result(result, prev=None, kpt_conf=KPT_CONF)`: takes an Ultralytics `Results` object, pulls out `keypoints.xy`, `keypoints.conf`, `boxes.xyxy` and `orig_shape`, and calls `find_hand`. Written so it also works on fake objects in tests.
 - `smooth_point(prev, new, alpha)`: EMA (section 3.10).
+- `green_mask(frame, imgsz)`: shrink, blur, HSV, inRange, open. Returns the mask and the scale used. The app also uses it for the preview.
+- `find_green_dot(frame, imgsz, prev=None)`: biggest contour above the min area, centroid from moments, scaled back to full frame coords (section 3.17). `prev` is not used, it just keeps the same shape as the YOLO call.
 
 `TrackerState` dataclass: `hand` (smoothed), `raw_hand`, `frame_time`, `inference_ms`, `latency_ms`, `detector_fps`, `result_id` (counts results), `error`.
 
@@ -334,6 +371,7 @@ Functions:
 - Live detector FPS uses a `deque(maxlen=10)` of result times: `(len - 1) / (last - first)`. It reacts quickly to changes.
 - `summary()` returns averages since the last `reset_stats()`: `detector_fps` (results / elapsed), `avg_inference_ms`, `avg_latency_ms`, `hand_found_pct`, `frames_skipped_pct`, `n_results`. The app calls `reset_stats()` when the countdown ends so the countdown frames do not count.
 - Inference time is `t1 - t0` around predict plus `hand_from_result`; latency is `t1 - frame_time`.
+- If the model is the string `GREEN`, `_run` calls `find_green_dot` instead of predict plus `hand_from_result`. Everything else (mailbox, smoothing, stats, timing) is the same code, so green numbers can be compared directly with the YOLO ones. `load_model` is never called for green mode.
 
 `python detector.py` loads each model on CPU (warm-up only at 320) and prints its size, params and load time.
 
@@ -381,6 +419,7 @@ Why: live numbers depend on the camera, the browser and how you move. The benchm
 - Image: Ultralytics' sample `zidane.jpg`, resized to 640x480 so it matches our webcam frames.
 - For each device (CPU, plus MPS with `--mps`), each model and each size: load without warm-up, then `bench_one` does `--warmup` untimed predicts (default 5), sets the CPU thread count (default 4), then times `--runs` predicts (default 30). Each timed run includes `hand_from_result`, because the game does that too.
 - It records mean, median, p90 and std of the times, `fps = 1000 / mean`, the Ultralytics pre/inference/post split, params, file size, GFLOPs, the letterbox shape and how many runs found a hand.
+- Unless `--no-green` is given, it also adds 4 green sticker rows (CPU, sizes 80/160/320/640). It draws a green dot on the zidane frame at a known spot and counts a run as found only if the centroid is within 10 px of it. Pre/infer/post, GFLOPs and threads are empty or 0 for these rows.
 - Saves the CSV and a plot: one subplot per device, grouped bars per model and size, log scale y axis (because values go from 4 ms to 234 ms).
 
 Our saved CSV was made with 20 timed runs per setting (the `hand_found` column shows 20/20).
@@ -397,8 +436,9 @@ Our saved CSV was made with 20 timed runs per setting (the `hand_found` column s
   - `prepare_frame` turns 720x1280 into 360x640 and mirrors.
   - `hand_from_result` with a fake result made from `SimpleNamespace`.
   - `HandTracker` with a `FakeModel` whose predict sleeps 50 ms and records which frame it saw. We submit frames 1 to 10 every 5 ms. The test checks that fewer than 10 were processed (frames were dropped), they were processed in increasing order (never an old frame after a new one), the last one processed was 10 (the newest frame is never lost), and the frames skipped % is above 0. Other tests check stop without start and that a crashing model sets `error` and the thread exits.
+  - Green mode: `find_green_dot` on a grey frame with a green circle gives the centre within 4 px at 80, 160 and 640, no green gives `None`, a few single green pixels and a tiny dot (below the min area) give `None`, two blobs picks the bigger one, and `HandTracker(GREEN, imgsz=80)` returns the hand with 100 % found.
   - A `slow` test loads the real Tiny model on `zidane.jpg` and checks that a hand is found in the right half of the image.
-- `test_app.py`: uses Streamlit's `AppTest` to load the page without exceptions, check the title, check the model picker has three models, and check the empty results caption. It never presses Start, so the webcam is not opened.
+- `test_app.py`: uses Streamlit's `AppTest` to load the page without exceptions, check the title, check the model picker has three models plus the green sticker option, and check the empty results caption. It never presses Start, so the webcam is not opened.
 
 ---
 
@@ -412,43 +452,54 @@ CPU, 4 threads:
 
 | model | params (M) | file (MB) | imgsz | model input | GFLOPs | mean ms | FPS |
 |---|---|---|---|---|---|---|---|
-| Tiny | 2.87 | 6.3 | 160 | 128x160 | 0.5 | 4.4 | 225.9 |
-| Tiny | 2.87 | 6.3 | 320 | 256x320 | 1.9 | 8.8 | 113.6 |
-| Tiny | 2.87 | 6.3 | 640 | 480x640 | 7.6 | 25.2 | 39.7 |
-| Small | 9.92 | 20.4 | 160 | 128x160 | 1.5 | 7.3 | 137.1 |
-| Small | 9.92 | 20.4 | 320 | 256x320 | 5.8 | 15.9 | 63.0 |
-| Small | 9.92 | 20.4 | 640 | 480x640 | 23.4 | 49.7 | 20.1 |
-| Big | 58.8 | 118.5 | 160 | 128x160 | 12.7 | 29.5 | 33.9 |
-| Big | 58.8 | 118.5 | 320 | 256x320 | 51.0 | 66.8 | 15.0 |
-| Big | 58.8 | 118.5 | 640 | 480x640 | 204.2 | 234.0 | 4.3 |
+| Tiny | 2.87 | 6.3 | 160 | 128x160 | 0.5 | 4.3 | 230.3 |
+| Tiny | 2.87 | 6.3 | 320 | 256x320 | 1.9 | 8.8 | 114.0 |
+| Tiny | 2.87 | 6.3 | 640 | 480x640 | 7.6 | 24.8 | 40.3 |
+| Small | 9.92 | 20.4 | 160 | 128x160 | 1.5 | 7.2 | 139.0 |
+| Small | 9.92 | 20.4 | 320 | 256x320 | 5.8 | 15.6 | 64.1 |
+| Small | 9.92 | 20.4 | 640 | 480x640 | 23.4 | 48.9 | 20.4 |
+| Big | 58.8 | 118.5 | 160 | 128x160 | 12.7 | 27.8 | 36.0 |
+| Big | 58.8 | 118.5 | 320 | 256x320 | 51 | 67.2 | 14.9 |
+| Big | 58.8 | 118.5 | 640 | 480x640 | 204.2 | 233.6 | 4.3 |
 
 MPS (Apple GPU):
 
 | model | imgsz | mean ms | FPS |
 |---|---|---|---|
-| Tiny | 160 | 8.0 | 125.0 |
-| Tiny | 320 | 8.8 | 113.7 |
-| Tiny | 640 | 12.3 | 81.0 |
-| Small | 160 | 9.8 | 102.1 |
-| Small | 320 | 12.6 | 79.3 |
-| Small | 640 | 19.9 | 50.4 |
-| Big | 160 | 27.8 | 36.0 |
-| Big | 320 | 41.4 | 24.2 |
-| Big | 640 | 105.7 | 9.5 |
+| Tiny | 160 | 8.1 | 123.8 |
+| Tiny | 320 | 9.1 | 109.5 |
+| Tiny | 640 | 14.7 | 68.1 |
+| Small | 160 | 10.1 | 98.5 |
+| Small | 320 | 14.2 | 70.3 |
+| Small | 640 | 24.6 | 40.6 |
+| Big | 160 | 27.6 | 36.3 |
+| Big | 320 | 44.8 | 22.3 |
+| Big | 640 | 111.6 | 9.0 |
 
-All runs found a hand on the test image (20/20), so on this easy image all models are "accurate enough".
+Green sticker mode (CPU, no network, test image is the same zidane frame with a green dot of radius 25 px drawn at (520, 120)):
+
+| imgsz | image it works on | mean ms | median ms | FPS | found |
+|---|---|---|---|---|---|
+| 80 | 60x80 | 0.22 | 0.22 | 4475 | 20/20 |
+| 160 | 120x160 | 0.06 | 0.06 | 16459 | 20/20 |
+| 320 | 240x320 | 0.16 | 0.16 | 6438 | 20/20 |
+| 640 | 480x640 | 0.52 | 0.51 | 1926 | 20/20 |
+
+All runs found a hand on the test image (20/20), so on this easy image all models are "accurate enough". For the green rows "found" only counts if the dot found is within 10 px of where we drew it.
 
 The chart is in `results/benchmark.png` (log scale).
 
 ### 5.2 How to read them
 
-- Model size: at 320 on CPU, Tiny 8.8 ms, Small 15.9 ms, Big 66.8 ms. Big has about 20x the parameters of Tiny and is about 7.6x slower.
-- Input size: Tiny goes 4.4, 8.8, 25.2 ms for 160, 320, 640. Big goes 29.5, 66.8, 234.0 ms.
-- Real time budget: a 30 FPS camera gives about 33 ms per frame. On CPU, everything except Big@320, Big@640 and Small@640 fits in that (Big@160 at 29.5 ms barely fits). Big@640 at 234 ms is about 7 camera frames late.
-- Hardware: MPS makes Big@640 go from 234.0 ms to 105.7 ms but does nothing for Tiny@320 (8.8 ms on both).
-- Stability: std is small (at most 2.2 ms), and median is close to mean, so the measurements are steady.
+- Model size: at 320 on CPU, Tiny 8.8 ms, Small 15.6 ms, Big 67.2 ms. Big has about 20x the parameters of Tiny and is about 7.6x slower.
+- Input size: Tiny goes 4.3, 8.8, 24.8 ms for 160, 320, 640. Big goes 27.8, 67.2, 233.6 ms.
+- Real time budget: a 30 FPS camera gives about 33 ms per frame. On CPU, everything except Big@320, Big@640 and Small@640 fits in that (Big@160 at 27.8 ms barely fits). Big@640 at 234 ms is about 7 camera frames late.
+- Hardware: MPS makes Big@640 go from 233.6 ms to 111.6 ms but does nothing for Tiny@320 (8.8 ms on CPU, 9.1 ms on MPS).
+- Stability: std is small on CPU (at most 4.2 ms, for Big@640), MPS is a bit noisier (up to 9.3 ms for Big@640), and median is close to mean, so the measurements are steady.
 - The `fps` column is the most the model could do. In the game the camera caps it at about 30 FPS (we saw about 26 detector FPS for Tiny@320 with about 13 ms delay in a fake camera test). For Tiny@320 the delay was about 13 ms vs 8.8 ms in the benchmark: the extra is time waiting in the mailbox and Python/GIL overhead in the live loop.
 - MPS pre/infer/post split is not meaningful because GPU work is asynchronous (section 3.14). Only `mean_ms` counts.
+
+- Green sticker: 0.06 to 0.52 ms with 0 params. That is about 8x (green@640) to 70x (green@160) faster than the fastest YOLO setting (Tiny@160, 4.3 ms), and about 450x to 3900x faster than Big@640 on CPU. But that only says it is fast on an image where we put a sticker, not that it tracks hands (section 3.17).
 
 Our default is Tiny@320 on 4 CPU threads: fast enough for the camera, and accurate enough when you sit at a normal distance.
 
@@ -482,7 +533,7 @@ The whole point is the trade off that matters on edge devices: limited compute m
 **Q3. What is the difference between latency and throughput?**
 Latency is the time for one frame from capture to result (ms). Throughput is results per second (FPS). For one frame at a time, FPS is about 1000 / latency, but batching or pipelining can raise throughput without lowering latency. For a game, latency is what you feel.
 
-**Q4. Your benchmark says Tiny@320 is 113 FPS. Why does the game show around 30?**
+**Q4. Your benchmark says Tiny@320 is 114 FPS. Why does the game show around 30?**
 The detector only runs when the camera gives a new frame, and the webcam gives about 30 FPS. So detector FPS is capped by the camera. In a fake camera test we saw about 26 detector FPS for Tiny@320.
 
 **Q5. What exactly is "Delay camera to basket"?**
@@ -546,13 +597,13 @@ The network downsamples by 2 five times, so the largest stride is 32. Sizes must
 Roughly with the number of pixels. Doubling width and height gives about 4x FLOPs: Tiny 1.9 to 7.6 GFLOPs, Big 51.0 to 204.2 GFLOPs from 320 to 640.
 
 **Q25. Does time grow exactly like FLOPs?**
-No. Big went from 66.8 to 234.0 ms (3.5x) for 4x FLOPs, and Tiny from 4.4 to 8.8 ms (2x) for about 4x FLOPs from 160 to 320. Small inputs have fixed overheads, and memory bandwidth and hardware usage also matter.
+No. Big went from 67.2 to 233.6 ms (3.5x) for 4x FLOPs, and Tiny from 4.3 to 8.8 ms (2x) for about 4x FLOPs from 160 to 320. Small inputs have fixed overheads, and memory bandwidth and hardware usage also matter.
 
 **Q26. Difference between params, FLOPs and file size?**
 Params: number of learned weights (Tiny 2.87 M, Big 58.8 M). File size: storage (6.3 MB vs 118.5 MB, about 2 bytes per param since weights are stored in FP16). FLOPs: compute per forward pass, depends on input size. Params and size tell you memory needs, FLOPs tell you about speed.
 
 **Q27. Can a smaller model at a bigger input be slower than a bigger model at a smaller input?**
-In FLOPs, Tiny@640 (7.6) is still below Big@160 (12.7), and timing agrees (25.2 vs 29.5 ms). But Small@640 (23.4 GFLOPs, 49.7 ms) is slower than Big@160 (12.7 GFLOPs, 29.5 ms). So "small model" alone does not mean fast, input size counts as much.
+In FLOPs, Tiny@640 (7.6) is still below Big@160 (12.7), and timing agrees (24.8 vs 27.8 ms). But Small@640 (23.4 GFLOPs, 48.9 ms) is slower than Big@160 (12.7 GFLOPs, 27.8 ms). So "small model" alone does not mean fast, input size counts as much.
 
 **Q28. Why limit the CPU to 4 threads?**
 To act like a 4 core edge board instead of a full laptop CPU. It is a proxy. A real board would be slower, but the trends would be the same.
@@ -561,7 +612,7 @@ To act like a 4 core edge board instead of a full laptop CPU. It is a proxy. A r
 Ultralytics resets the PyTorch thread count when it builds its predictor, so we set it back if it changed. The benchmark does the same after warm-up.
 
 **Q30. Why does MPS help Big but not Tiny?**
-The GPU has fixed costs per call (moving data, launching kernels, syncing). For Big@640 the compute is large so MPS wins (105.7 vs 234.0 ms). For Tiny the compute is tiny, so the overhead dominates: 8.8 ms on both at 320, and MPS is slower at 160 (8.0 vs 4.4 ms).
+The GPU has fixed costs per call (moving data, launching kernels, syncing). For Big@640 the compute is large so MPS wins (111.6 vs 233.6 ms). For Tiny the compute is tiny, so the overhead dominates: 8.8 ms on CPU vs 9.1 ms on MPS at 320, and MPS is slower at 160 (8.1 vs 4.3 ms).
 
 **Q31. Why is post_ms so big on MPS?**
 GPU work is asynchronous. "Inference" only records sending the work. The actual waiting happens when results are copied back to the CPU during post-processing. So only the total is meaningful on MPS.
@@ -591,7 +642,7 @@ A `FakeModel` that sleeps 50 ms and records which frame it saw. We submit 10 fra
 For each device, model and size: 5 warm-up predicts, then timed predicts (20 in our saved CSV) including hand extraction, on a 640x480 image. It reports mean, median, p90, std, FPS, the pre/infer/post split, params, file size, GFLOPs and the model input shape.
 
 **Q40. Why use median and p90 too, not just the mean?**
-The mean can be pulled by a few slow outliers. Median shows the typical case, p90 shows how bad slow frames get, which matters for real time. In our runs they are close (Big@640 mean 234.0, median 234.9, p90 236.0), so timings were stable.
+The mean can be pulled by a few slow outliers. Median shows the typical case, p90 shows how bad slow frames get, which matters for real time. In our runs they are close (Big@640 on CPU mean 233.6, median 232.8, p90 235.8), so timings were stable.
 
 **Q41. Why did you choose Tiny@320 as the default?**
 8.8 ms on CPU, well inside the 33 ms camera frame budget, and 320 px is enough detail at normal sitting distance. 160 is faster but loses the hand more easily when far away. 640 triples the time for little gain in the game.
@@ -623,6 +674,42 @@ The share of detector results where a hand was found. Low values mean the model 
 **Q50. What happens if the camera fails?**
 `open_camera` retries 30 times. If it never gets a frame we show help about macOS permissions and the camera index. During a round, 30 empty reads in a row end the round with "Lost the camera feed."
 
+**Q51. What is the green sticker mode?**
+A fourth tracking option with no neural network. The player sticks a green dot on the palm, and we find it with a colour threshold in HSV, clean the mask with a morphological open, take the biggest contour and use its centroid as the hand position.
+
+**Q52. Why convert to HSV instead of thresholding in RGB?**
+In RGB, brightness is spread over all three channels, so the same green in shadow and in bright light are far apart. HSV puts the colour in one channel (hue) and brightness in another (value), so one hue range catches the sticker in most lighting. We still need minimum S and V so grey and very dark pixels do not count.
+
+**Q53. What does `cv2.inRange` give you?**
+A binary mask the same size as the image: 255 where all three HSV values are inside the low/high limits, 0 elsewhere.
+
+**Q54. What is a morphological open and why do it?**
+Erosion followed by dilation with a small kernel (3x3 here). Erosion deletes blobs smaller than the kernel (noise pixels), dilation grows the surviving blobs back. So single noisy pixels go away and the sticker stays about the same size.
+
+**Q55. How do you get the centre of the blob?**
+Image moments of the contour: `m00` is the area, `m10` and `m01` are sums of x and y. Centroid is `(m10 / m00, m01 / m00)`. Then we divide by the scale to go back to full frame pixels.
+
+**Q56. Why is there a minimum area?**
+So a few stray green pixels or a tiny far away green thing do not count as the hand. It is a fraction of the image area (0.05 %), so it scales with the input size.
+
+**Q57. How fast is it compared to YOLO?**
+In the benchmark green@160 takes 0.06 ms and green@640 0.52 ms, while the fastest YOLO setting (Tiny@160 on CPU) takes 4.3 ms. So about 8x to 70x faster, with 0 params and 0 MB. In the live game both are capped by the camera at about 25 to 30 FPS, but the delay drops from about 12 ms (Tiny@320) to about 1 ms.
+
+**Q58. Why is it so fast?**
+No network. Every step is a cheap per pixel operation (resize, blur, colour convert, compare, 3x3 erode/dilate) plus contour tracing, roughly O(pixels), done in optimized C++. At 160 px there are only 19,200 pixels. YOLO Tiny@160 is about 0.5 GFLOPs per frame.
+
+**Q59. Why is green@80 slower than green@160 in your benchmark?**
+OpenCV's INTER_AREA resize has a fast path for shrinking by 2x or 4x, and 640 to 80 is 8x, so it goes through the slower general code (about 0.2 ms vs 0.01 ms). It is still far below a millisecond, so it does not matter for the game.
+
+**Q60. If it is so fast, why not always use it?**
+It needs a marker and controlled conditions. Any bigger green object (plant, t-shirt, wall) wins, lighting and auto white balance can push the sticker out of the range, and without the sticker it finds nothing. The pose model works for anyone with no setup. It is the speed vs generality trade-off.
+
+**Q61. Classical CV vs deep learning, which is better for edge devices?**
+Depends on whether you control the scene. Classical CV is tiny, fast, low power and easy to explain, and fine when the setup is fixed (markers, factory lines). Deep learning handles messy real scenes but costs much more compute and memory. A common edge design uses a cheap classical step first and runs the network only when needed.
+
+**Q62. How would you make the colour tracker more reliable?**
+Calibrate the colour at the start (sample the sticker and set the range around it), use a less common marker colour, track the blob over time and ignore jumps (for example only search near the last position), and lock the camera's white balance and exposure if possible.
+
 ---
 
 ## 7. Limitations
@@ -635,6 +722,7 @@ The share of detector results where a hand was found. Low values mean the model 
 - The benchmark uses a single image, so it does not cover different lighting, distance or many people.
 - Game results depend on the player, their reaction time and practice, so rounds are noisy. Several rounds per setting are needed.
 - The GIL and Streamlit overheads add some delay in the live loop compared to the benchmark.
+- Green sticker mode needs a marker, a fixed hand picked colour range and no other green things in view. We did not test it under different lighting.
 - The biggest box rule can pick the wrong person if someone walks close behind the player.
 
 ---

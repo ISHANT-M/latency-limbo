@@ -1,5 +1,5 @@
 """
-Offline benchmark for the pose models.
+Offline benchmark for the pose models (and the green sticker colour tracker).
 
 Same idea as the game but without the webcam: run every model at every input
 size on one test image and time it. Gives us numbers we can put in the report.
@@ -19,9 +19,13 @@ import pandas as pd
 import torch
 from ultralytics.utils import ASSETS
 
-from detector import (DEFAULT_THREADS, IMG_SIZES, MAX_PEOPLE, MODELS, PERSON_CONF,
-                      count_params, hand_from_result, letterbox_shape, load_model,
-                      model_gflops, mps_available, weights_path)
+from detector import (DEFAULT_THREADS, GREEN_SIZES, IMG_SIZES, MAX_PEOPLE, MODELS,
+                      PERSON_CONF, count_params, find_green_dot, hand_from_result,
+                      letterbox_shape, load_model, model_gflops, mps_available, weights_path)
+
+# where we draw the fake sticker on the test image for the green rows
+STICKER_XY = (520, 120)
+STICKER_R = 25  # zidane has a greenish patch (~940 px) bottom left, the sticker has to beat it
 
 
 def parse_args():
@@ -33,6 +37,7 @@ def parse_args():
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     ap.add_argument("--mps", action="store_true", help="also run on the Apple GPU")
     ap.add_argument("--image", default=None, help="test image (default: ultralytics zidane.jpg)")
+    ap.add_argument("--no-green", action="store_true", help="skip the green sticker rows")
     ap.add_argument("--out", default="results/benchmark.csv")
     return ap.parse_args()
 
@@ -61,6 +66,20 @@ def bench_one(model, device, imgsz, img, runs, warmup, threads):
         speeds.append((r.speed["preprocess"], r.speed["inference"], r.speed["postprocess"]))
         found += hand is not None
     return np.array(times), np.array(speeds).mean(axis=0), found
+
+
+def bench_green(img, imgsz, runs, warmup):
+    for _ in range(warmup):
+        find_green_dot(img, imgsz)
+    times, found = [], 0
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        hand = find_green_dot(img, imgsz)
+        times.append((time.perf_counter() - t0) * 1000)
+        # only count it if it found the sticker we drew, not something else
+        if hand is not None and np.hypot(hand[0] - STICKER_XY[0], hand[1] - STICKER_XY[1]) < 10:
+            found += 1
+    return np.array(times), found
 
 
 def make_plot(df, path):
@@ -145,6 +164,28 @@ def main():
                 })
                 print(f"  {device} {model_file} @{imgsz}: {times.mean():.1f} ms")
             del model
+
+    if not args.no_green:
+        # zidane plus a green dot, no network so cpu only and no threads setting
+        green_img = img.copy()
+        cv2.circle(green_img, STICKER_XY, STICKER_R, (40, 200, 40), -1)
+        for imgsz in GREEN_SIZES:
+            times, found = bench_green(green_img, imgsz, args.runs, args.warmup)
+            sc = min(1.0, imgsz / 640)
+            rows.append({
+                "device": "cpu", "model": "Green", "model_file": "", "params_m": 0.0,
+                "file_mb": 0.0, "imgsz": imgsz, "input_hw": f"{round(480 * sc)}x{round(640 * sc)}",
+                "gflops": 0.0,
+                "mean_ms": round(times.mean(), 2),
+                "median_ms": round(float(np.median(times)), 2),
+                "p90_ms": round(float(np.percentile(times, 90)), 2),
+                "std_ms": round(times.std(), 2),
+                "fps": round(1000 / times.mean(), 1),
+                "pre_ms": "", "infer_ms": "", "post_ms": "",
+                "hand_found": f"{found}/{args.runs}",
+                "threads": "",
+            })
+            print(f"  cpu green @{imgsz}: {times.mean():.2f} ms")
 
     df = pd.DataFrame(rows)
     print()

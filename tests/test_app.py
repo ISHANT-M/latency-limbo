@@ -13,10 +13,11 @@ def test_app_loads_without_errors():
     assert at.title[0].value == "Latency Limbo"
 
 
-def test_model_picker_has_three_models():
+def test_model_picker_has_three_models_plus_green():
     at = AppTest.from_file(APP, default_timeout=60).run()
     picker = [s for s in at.sidebar.selectbox if s.label == "Hand detector model"][0]
-    assert len(picker.options) == 3
+    assert len(picker.options) == 4
+    assert picker.options[-1] == "Green sticker (colour tracking)"
 
 
 def test_results_empty_at_start():

@@ -28,6 +28,15 @@ MODELS = {
     "Big (YOLO11x-pose)": "yolo11x-pose.pt",
 }
 IMG_SIZES = [160, 320, 640]
+
+# no neural net at all, just finds a green sticker on the palm
+GREEN_LABEL = "Green sticker (colour tracking)"
+GREEN = "green"  # pass this as the model to HandTracker
+GREEN_SIZES = [80, 160, 320, 640]
+GREEN_DEFAULT_IMGSZ = 160
+GREEN_LOW = (40, 70, 70)     # HSV, OpenCV hue goes 0-179
+GREEN_HIGH = (85, 255, 255)
+GREEN_MIN_AREA = 0.0005      # smallest blob we accept, as a fraction of the image area
 DEFAULT_IMGSZ = 320
 FRAME_WIDTH = 640
 DEFAULT_THREADS = 4  # pretend we're on a 4-core edge board
@@ -181,6 +190,44 @@ def hand_from_result(result, prev=None, kpt_conf=KPT_CONF):
                      frame_shape=result.orig_shape)
 
 
+def find_green_dot(frame, imgsz, prev=None):
+    """Find the biggest green blob. Returns (x, y) in full frame pixels or None.
+
+    prev is not used, it's only there so the call looks like the YOLO path.
+    """
+    mask, scale = green_mask(frame, imgsz)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    min_area = GREEN_MIN_AREA * mask.shape[0] * mask.shape[1]
+    best = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(best) < min_area:
+        return None
+    m = cv2.moments(best)
+    if m["m00"] == 0:
+        return None
+    # centroid from the moments, then back to full size coords
+    cx, cy = m["m10"] / m["m00"], m["m01"] / m["m00"]
+    return (float((cx + 0.5) / scale - 0.5), float((cy + 0.5) / scale - 0.5))
+
+
+def green_mask(frame, imgsz):
+    """Binary mask of the green pixels at the small size. Also returns the scale used."""
+    h, w = frame.shape[:2]
+    scale = min(1.0, imgsz / max(h, w))
+    if scale < 1.0:
+        small = cv2.resize(frame, (max(1, round(w * scale)), max(1, round(h * scale))),
+                           interpolation=cv2.INTER_AREA)
+    else:
+        small = frame
+    small = cv2.GaussianBlur(small, (3, 3), 0)  # kills a bit of camera noise
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, GREEN_LOW, GREEN_HIGH)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    # real scale can differ a tiny bit from imgsz/max because of rounding
+    return mask, small.shape[1] / w
+
+
 def smooth_point(prev, new, alpha):
     """Exponential smoothing. alpha 0 = no smoothing, higher = less jitter but more lag."""
     alpha = min(max(alpha, 0.0), 0.95)
@@ -305,14 +352,19 @@ class HandTracker:
                 continue
 
             # ultralytics resets this when it builds the predictor, so set it back every time
-            if self.device == "cpu" and self.num_threads and torch.get_num_threads() != self.num_threads:
+            green = isinstance(self.model, str) and self.model == GREEN
+            if not green and self.device == "cpu" and self.num_threads \
+                    and torch.get_num_threads() != self.num_threads:
                 torch.set_num_threads(self.num_threads)
 
             try:
                 t0 = time.perf_counter()
-                res = self.model.predict(frame, imgsz=self.imgsz, device=self.device,
-                                         conf=PERSON_CONF, max_det=MAX_PEOPLE, verbose=False)
-                raw = hand_from_result(res[0], prev=self._last_raw, kpt_conf=self.kpt_conf)
+                if green:
+                    raw = find_green_dot(frame, self.imgsz, prev=self._last_raw)
+                else:
+                    res = self.model.predict(frame, imgsz=self.imgsz, device=self.device,
+                                             conf=PERSON_CONF, max_det=MAX_PEOPLE, verbose=False)
+                    raw = hand_from_result(res[0], prev=self._last_raw, kpt_conf=self.kpt_conf)
                 t1 = time.perf_counter()
             except Exception as e:
                 with self._lock:

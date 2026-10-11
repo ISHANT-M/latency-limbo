@@ -5,8 +5,8 @@ import cv2
 import numpy as np
 import pytest
 
-from detector import (L_ELBOW, L_WRIST, R_ELBOW, R_WRIST, HandTracker, find_hand,
-                      hand_from_result, letterbox_shape, prepare_frame, smooth_point)
+from detector import (GREEN, L_ELBOW, L_WRIST, R_ELBOW, R_WRIST, HandTracker, find_green_dot,
+                      find_hand, hand_from_result, letterbox_shape, prepare_frame, smooth_point)
 
 
 def person(lw=None, rw=None, le=None, re=None):
@@ -217,3 +217,56 @@ def test_real_model_finds_a_hand():
     x, y = hand
     assert 640 < x < 1280
     assert 0 <= y < 720
+
+
+# green sticker mode
+
+def green_frame(center=(450, 150), radius=20, noise=False):
+    frame = np.full((480, 640, 3), 90, dtype=np.uint8)  # plain grey
+    if center is not None:
+        cv2.circle(frame, center, radius, (40, 200, 40), -1)  # BGR green
+    if noise:
+        # a few single green pixels, like camera noise
+        for x, y in ((50, 50), (300, 400), (600, 20)):
+            frame[y, x] = (40, 200, 40)
+    return frame
+
+
+@pytest.mark.parametrize("imgsz", [80, 160, 640])
+def test_find_green_dot_centroid(imgsz):
+    hand = find_green_dot(green_frame(), imgsz)
+    assert hand is not None
+    x, y = hand
+    assert abs(x - 450) < 4
+    assert abs(y - 150) < 4
+
+
+def test_find_green_dot_no_green():
+    assert find_green_dot(green_frame(center=None), 160) is None
+
+
+def test_find_green_dot_ignores_tiny_noise():
+    frame = green_frame(center=(320, 240), radius=2, noise=True)
+    assert find_green_dot(frame, 640) is None
+
+
+def test_find_green_dot_picks_biggest_blob():
+    frame = green_frame(center=(100, 100), radius=10)
+    cv2.circle(frame, (500, 300), 30, (40, 200, 40), -1)
+    x, y = find_green_dot(frame, 320)
+    assert abs(x - 500) < 4 and abs(y - 300) < 4
+
+
+def test_tracker_green_mode():
+    tracker = HandTracker(GREEN, imgsz=80)
+    tracker.start()
+    try:
+        tracker.submit(green_frame(), time.perf_counter())
+        assert wait_for(lambda: tracker.latest().result_id >= 1)
+    finally:
+        tracker.stop()
+    state = tracker.latest()
+    assert state.error is None
+    assert state.raw_hand is not None
+    assert abs(state.raw_hand[0] - 450) < 4
+    assert tracker.summary()["hand_found_pct"] == 100.0

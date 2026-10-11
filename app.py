@@ -17,7 +17,8 @@ import streamlit as st
 from game import FruitGame
 from detector import (MODELS, IMG_SIZES, DEFAULT_IMGSZ, DEFAULT_THREADS, HandTracker,
                       load_model, mps_available, prepare_frame, letterbox_shape,
-                      count_params, weights_path)
+                      count_params, weights_path, GREEN, GREEN_LABEL, GREEN_SIZES,
+                      GREEN_DEFAULT_IMGSZ, green_mask)
 
 COUNTDOWN_S = 3
 JPEG_QUALITY = 80
@@ -103,9 +104,16 @@ if "history" not in st.session_state:
 
 # ---- sidebar ----
 st.sidebar.header("Settings")
-label = st.sidebar.selectbox("Hand detector model", list(MODELS),
-                             help="Tiny is fast but less accurate. Big is accurate but slow.")
-imgsz = st.sidebar.selectbox("Input resolution", IMG_SIZES, index=IMG_SIZES.index(DEFAULT_IMGSZ),
+label = st.sidebar.selectbox("Hand detector model", list(MODELS) + [GREEN_LABEL],
+                             help="Tiny is fast but less accurate. Big is accurate but slow. "
+                                  "Green sticker skips the neural net and just looks for a colour.")
+green_mode = label == GREEN_LABEL
+if green_mode:
+    st.sidebar.info("Stick a green dot (or green tape) on your palm. "
+                    "Avoid green backgrounds/clothes.")
+sizes = GREEN_SIZES if green_mode else IMG_SIZES
+default_size = GREEN_DEFAULT_IMGSZ if green_mode else DEFAULT_IMGSZ
+imgsz = st.sidebar.selectbox("Input resolution", sizes, index=sizes.index(default_size),
                              format_func=lambda s: f"{s} px",
                              help="The camera frame is shrunk to this size before the model sees it.")
 smoothing = st.sidebar.slider("Smoothing", 0.0, 0.9, 0.0, step=0.1,
@@ -141,19 +149,28 @@ else:
     if old is not None:
         old.stop()
 
-    model_file = MODELS[label]
-    device = "mps" if use_mps else "cpu"
-    with st.spinner(f"Loading {label} (the first time also downloads the weights)..."):
-        model, device_used = get_model(model_file, device)
-    if use_mps and device_used != "mps":
-        st.warning("Apple GPU did not work here, using the CPU instead.")
-
-    params_m = count_params(model) / 1e6
-    file_mb = weights_path(model_file).stat().st_size / 1e6
-    if device_used == "cpu":
-        device_text = f"CPU, {threads} threads"
+    if green_mode:
+        # plain OpenCV, nothing to load and it always runs on the CPU
+        model, device_used = GREEN, "cpu"
+        model_text = "Model: colour threshold (no neural network), 0 params"
+        device_text = "CPU"
+        if use_mps:
+            st.info("Colour tracking has no network, so it always runs on the CPU.")
     else:
-        device_text = "Apple GPU"
+        model_file = MODELS[label]
+        device = "mps" if use_mps else "cpu"
+        with st.spinner(f"Loading {label} (the first time also downloads the weights)..."):
+            model, device_used = get_model(model_file, device)
+        if use_mps and device_used != "mps":
+            st.warning("Apple GPU did not work here, using the CPU instead.")
+
+        params_m = count_params(model) / 1e6
+        file_mb = weights_path(model_file).stat().st_size / 1e6
+        model_text = f"Model: {label} ({params_m:.1f} M params, {file_mb:.1f} MB)"
+        if device_used == "cpu":
+            device_text = f"CPU, {threads} threads"
+        else:
+            device_text = "Apple GPU"
 
     cap = open_camera(int(cam_index))
     if cap is None:
@@ -182,7 +199,12 @@ else:
         else:
             frame = prepare_frame(raw)
             h, w = frame.shape[:2]
-            lh, lw = letterbox_shape(h, w, imgsz)
+            if green_mode:
+                # no letterbox here, we just shrink the long side to imgsz
+                sc = min(1.0, imgsz / max(h, w))
+                lh, lw = round(h * sc), round(w * sc)
+            else:
+                lh, lw = letterbox_shape(h, w, imgsz)
             seed = FAIR_SEED if same_fruits else None
             game = FruitGame(w, h, duration=duration, seed=seed)
 
@@ -217,8 +239,15 @@ else:
 
                 # show the shrunk input before we draw anything on the frame
                 if now - last_preview >= PREVIEW_EVERY:
-                    preview_slot.image(model_view(frame, imgsz), channels="BGR",
-                                       caption=f"What the model sees ({lw}x{lh} px)")
+                    if green_mode:
+                        # show the mask, white = pixels we think are green
+                        mask, _ = green_mask(frame, imgsz)
+                        view = cv2.resize(mask, (320, round(320 * h / w)),
+                                          interpolation=cv2.INTER_NEAREST)
+                        preview_slot.image(view, caption=f"Green mask ({lw}x{lh} px)")
+                    else:
+                        preview_slot.image(model_view(frame, imgsz), channels="BGR",
+                                           caption=f"What the model sees ({lw}x{lh} px)")
                     last_preview = now
 
                 left = countdown_end - now
@@ -253,7 +282,7 @@ else:
                 if now - last_stats >= STATS_EVERY:
                     s = tracker.summary()
                     lines = [
-                        f"Model: {label} ({params_m:.1f} M params, {file_mb:.1f} MB)",
+                        model_text,
                         f"Input: {imgsz} px (model sees {lw}x{lh})",
                         f"Device: {device_text}",
                         f"Detector FPS: {state.detector_fps:.1f}",
@@ -283,7 +312,7 @@ else:
 
         history = st.session_state["history"]
         n = len(history) + 1
-        short = label.split()[0]
+        short = "Green" if green_mode else label.split()[0]
         dev = "CPU" if device_used == "cpu" else "MPS"
         rate = game.catch_rate() * 100
         played = round_end - round_start
@@ -342,7 +371,10 @@ with st.expander("What is going on here?"):
         "- The \"ms old\" label under the circle is how old the camera frame behind it is.\n"
         "- Edge devices like phones, Raspberry Pi, Jetson boards and smart cameras have little "
         "compute, power and memory, so a small fast model often beats a big accurate one in real time.\n"
-        "- The Apple GPU option shows that hardware matters too: same model, very different speed."
+        "- The Apple GPU option shows that hardware matters too: same model, very different speed.\n"
+        "- The green sticker mode is classic colour tracking: no neural net, just a colour threshold "
+        "and the biggest blob. It is extremely fast, but it only works with the sticker and good "
+        "lighting. That is the trade-off: speed vs generality and coping with different lighting."
     )
 
 st.caption("Made by Ishant Mehndiratta, Satyam Tiwari, Ishaan Sharma and Hiten Mohindra.")
